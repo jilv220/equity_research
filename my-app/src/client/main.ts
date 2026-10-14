@@ -60,6 +60,7 @@ export const Message = defineMessageUnion({
   ChangedUrl: { url: Url },
   CompletedNavigateInternal: {},
   CompletedLoadExternal: {},
+  CompletedScrollToTop: {},
   SucceededFetchScore: { requestId: Schema.Number, pollCount: Schema.Number, response: ScoreResponse },
   FailedFetchScore: { requestId: Schema.Number, ticker: Schema.String, error: Schema.String },
   CompletedWaitBeforePoll: { requestId: Schema.Number, ticker: Schema.String, pollCount: Schema.Number },
@@ -144,6 +145,14 @@ const LoadExternal = Command.define('LoadExternal', {
   args: { href: Schema.String },
   messages: [Message.CompletedLoadExternal],
   execute: ({ href }) => load(href).pipe(Effect.as(Message.CompletedLoadExternal())),
+})
+
+export const ScrollToTop = Command.define('ScrollToTop', {
+  messages: [Message.CompletedScrollToTop],
+  execute: Effect.sync(() => {
+    window.scrollTo({ top: 0, behavior: 'instant' })
+    return Message.CompletedScrollToTop()
+  }),
 })
 
 // INIT
@@ -252,10 +261,17 @@ export const update = (model: Model, message: Message) =>
         External: ({ href }) => ({ model, commands: [LoadExternal({ href })] }),
       }),
 
-    ChangedUrl: ({ url }) => enterRoute(model, urlToAppRoute(url)),
+    // A new page starts at the top; without this the scroll position carries over from the
+    // previous company, e.g. after picking a ticker far down the watchlist.
+    ChangedUrl: ({ url }) => {
+      const routeEntered = enterRoute(model, urlToAppRoute(url))
+
+      return { model: routeEntered.model, commands: [...(routeEntered.commands ?? []), ScrollToTop()] }
+    },
 
     CompletedNavigateInternal: () => ({ model }),
     CompletedLoadExternal: () => ({ model }),
+    CompletedScrollToTop: () => ({ model }),
 
     SucceededFetchScore: ({ requestId, pollCount, response }) => {
       if (requestId !== model.requestId) {
