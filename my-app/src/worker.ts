@@ -57,11 +57,16 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = NO_
   });
 
 /** Drop cached reads that show `ticker`'s score and the watchlist. Best effort: the TTL is the backstop. */
-async function purgeScore(cache: CacheContext | undefined, ticker: string) {
+async function purgeScore(cache: CacheContext | undefined, ticker: string, from: string) {
+  if (!cache) {
+    console.warn(`cache purge skipped for ${ticker} (${from}): ctx.cache unavailable`);
+    return;
+  }
   try {
-    await cache?.purge({ tags: [scoreTag(ticker), WATCHLIST_TAG] });
+    const result = await cache.purge({ tags: [scoreTag(ticker), WATCHLIST_TAG] });
+    console.log(`cache purge for ${ticker} (${from}): ${JSON.stringify(result)}`);
   } catch (e) {
-    console.warn(`cache purge failed for ${ticker}`, e);
+    console.warn(`cache purge failed for ${ticker} (${from})`, e);
   }
 }
 
@@ -175,11 +180,12 @@ export class ScoreWorkflow extends WorkflowEntrypoint<WorkerEnv, ScoreParams> {
         await env.Bucket.put(scoreKey(ticker), JSON.stringify(card), {
           customMetadata: { summary: JSON.stringify(summary) },
         });
-        const job = await readJson<Job>(env.Bucket, jobKey(ticker));
-        if (job?.value.id === event.instanceId) {
-          await env.Bucket.put(jobKey(ticker), JSON.stringify({ ...job.value, status: "complete" }));
+        // ctx.cache isn't available inside a Workflow, so purge through this Worker's own fetch handler.
+        try {
+          await env.SELF.fetch(`https://self/api/purge/${encodeURIComponent(ticker)}`);
+        } catch (e) {
+          console.warn(`cache purge request failed for ${ticker}`, e);
         }
-        await purgeScore(this.ctx.cache, ticker);
         return summary;
       },
     );
@@ -198,7 +204,7 @@ async function jobState(env: WorkerEnv, ctx: ExecutionContext, ticker: string, j
     if (TERMINAL.has(st.status)) {
       await env.Bucket.put(jobKey(ticker), JSON.stringify(next));
       // Awaited, not waitUntil: the UI refetches the watchlist as soon as this poll reports completion.
-      await purgeScore(ctx.cache, ticker);
+      await purgeScore(ctx.cache, ticker, "api");
     }
     return next;
   } catch {
@@ -242,6 +248,14 @@ export default {
       }
       const isSettled = !refresh && !isPoll && !stale && !(job && ACTIVE.has(job.status));
       return json({ ticker, card: card?.value ?? null, job }, 200, isSettled ? cacheFor([scoreTag(ticker)]) : NO_STORE);
+    }
+
+    // GET /api/purge/:ticker — drops the cached reads for one company and the watchlist. Called by the
+    // ScoreWorkflow after it writes a score; harmless if called by anyone else (it only forces cache misses).
+    const purge = path.match(/^\/api\/purge\/([A-Za-z0-9.\-]{1,10})$/);
+    if (purge) {
+      await purgeScore(ctx.cache, normalize(purge[1]!), "workflow");
+      return json({ ok: true });
     }
 
     // GET /api/scores — every scored company, ranked by score, ties broken by TTM ROIC.

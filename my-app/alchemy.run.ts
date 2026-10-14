@@ -26,7 +26,8 @@ export const ScoreWorkflow = Cloudflare.Workflow<ScoreParams>("ScoreWorkflow", {
 // src/worker.ts runs first for /api/* and hosts the ScoreWorkflow. Every other path serves the app.
 export const Worker = Cloudflare.Website.Foldkit("Worker", {
   main: "./src/worker.ts",
-  env: { Bucket, SEC_USER_AGENT, SCORE_WORKFLOW: ScoreWorkflow },
+  // SELF lets the ScoreWorkflow re-enter this Worker's fetch handler, which has ctx.cache for purging.
+  env: { Bucket, SEC_USER_AGENT, SCORE_WORKFLOW: ScoreWorkflow, SELF: Cloudflare.WorkerEntrypoint() },
   assets: { runWorkerFirst: ["/api/*"] },
   // Edge-cache /api reads; responses opt in with Cache-Control and are purged by Cache-Tag on re-score.
   cache: { enabled: true, crossVersionCache: true },
