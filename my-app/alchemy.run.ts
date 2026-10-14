@@ -22,9 +22,12 @@ export const ScoreWorkflow = Cloudflare.Workflow<ScoreParams>("ScoreWorkflow", {
   schedules: ["0 6 * * *"],
 });
 
-export const Worker = Cloudflare.Worker("Worker", {
+// The Foldkit client (index.html + src/client) is built by Vite and served as static assets;
+// src/worker.ts runs first for /api/* and hosts the ScoreWorkflow. Every other path serves the app.
+export const Worker = Cloudflare.Website.Foldkit("Worker", {
   main: "./src/worker.ts",
   env: { Bucket, SEC_USER_AGENT, SCORE_WORKFLOW: ScoreWorkflow },
+  assets: { runWorkerFirst: ["/api/*"] },
 });
 
 export type WorkerEnv = Cloudflare.InferEnv<typeof Worker>;

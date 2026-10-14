@@ -4,7 +4,6 @@ import { NonRetryableError } from "cloudflare:workflows";
 import type { ScoreParams, WorkerEnv } from "../alchemy.run.ts";
 import { edgar, EdgarError, type Cache } from "./scoring/edgar.ts";
 import type { Scorecard } from "./scoring/score.ts";
-import { page } from "./ui.ts";
 
 const HOUR = 3_600_000;
 /** Scores older than this are re-queued when viewed (the nightly run normally keeps them fresh). */
@@ -159,11 +158,10 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+    // Only /api/* reaches this handler first (assets.runWorkerFirst); anything else is the Foldkit app.
+    if (!path.startsWith("/api/")) return env.ASSETS.fetch(request);
 
-    if (path === "/" || path === "/index.html") {
-      return new Response(page, { headers: { "content-type": "text/html; charset=utf-8" } });
-    }
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
 
     // GET /api/score/:ticker[?refresh=1]
     // Returns the stored scorecard (if any) and the background job's state, starting a job when the
@@ -181,7 +179,7 @@ export default {
       if (prev) {
         try {
           const st = await (await env.SCORE_WORKFLOW.get(prev.value.id)).status();
-          job = { ...prev.value, status: st.status, error: st.error?.message };
+          job = { ...prev.value, status: st.status, error: st.error?.message.replace(/^NonRetryableError:\s*/, "") };
         } catch {
           job = { ...prev.value, status: "unknown" };
         }
