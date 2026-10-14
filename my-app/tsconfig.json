@@ -3,8 +3,13 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2023"],
-    "types": ["@cloudflare/workers-types", "@types/node"],
+    "lib": [
+      "ES2023"
+    ],
+    "types": [
+      "@cloudflare/workers-types",
+      "@types/node"
+    ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "allowImportingTsExtensions": true,
@@ -13,5 +18,12 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["alchemy.run.ts", "src", "scripts"]
+  "include": [
+    "alchemy.run.ts",
+    "src",
+    "scripts"
+  ],
+  "exclude": [
+    "src/client"
+  ]
 }
