@@ -305,14 +305,23 @@ export const update = (model: Model, message: Message) =>
 
 const formatScore = (n: number) => globalThis.String(Math.round(n * 10) / 10)
 
-const ratingClass = (rating: string) =>
-  Option.match(Array.head(rating.split(' ')), { onNone: () => 'r-Excluded', onSome: word => `r-${word}` })
+const PANEL = 'rounded-xl border border-line bg-panel'
+const LABEL = 'text-xs font-semibold uppercase tracking-wider text-muted'
+const CELL = 'border-t border-line px-2.5 py-2 align-top'
 
-const pointsClass = (metric: Metric) =>
+const ratingTone = (rating: string) =>
+  Match.value(rating).pipe(
+    Match.when('Monopoly', () => 'bg-good-soft text-good'),
+    Match.when('Strong moat', () => 'bg-accent-soft text-accent'),
+    Match.when('Contested', () => 'bg-mid-soft text-mid'),
+    Match.orElse(() => 'bg-bad-soft text-bad'),
+  )
+
+const pointsTone = (metric: Metric) =>
   Match.value(metric.points).pipe(
-    Match.when(Number.isGreaterThanOrEqualTo(metric.max), () => 'p-full'),
-    Match.when(Number.isGreaterThan(0), () => 'p-part'),
-    Match.orElse(() => 'p-zero'),
+    Match.when(Number.isGreaterThanOrEqualTo(metric.max), () => 'bg-good-soft text-good'),
+    Match.when(Number.isGreaterThan(0), () => 'bg-mid-soft text-mid'),
+    Match.orElse(() => 'bg-bad-soft text-bad'),
   )
 
 const selectedTicker = (model: Model): Option.Option<string> =>
@@ -324,7 +333,7 @@ const selectedTicker = (model: Model): Option.Option<string> =>
 
 const watchlistView = (model: Model, h: HtmlBuilder<Message>): Html => {
   const maybeSelected = selectedTicker(model)
-  const emptyRow = (text: string) => h.tr([], [h.td([h.Class('empty')], [text])])
+  const emptyRow = (text: string) => h.tr([], [h.td([h.Class('px-4 py-3 text-muted')], [text])])
 
   const rows = AsyncData.matchDataSplitEmpty(model.watchlist, {
     onIdle: () => [emptyRow('Loading…')],
@@ -336,19 +345,30 @@ const watchlistView = (model: Model, h: HtmlBuilder<Message>): Html => {
         onNonEmpty: nonEmpty =>
           Array.map(sortWatchlist(nonEmpty), (summary, index) =>
             h.tr(
-              [h.Key(summary.ticker), h.Class(Option.contains(maybeSelected, summary.ticker) ? 'sel' : '')],
               [
-                h.td([h.Class('rank')], [globalThis.String(index + 1)]),
+                h.Key(summary.ticker),
+                h.Class(
+                  `hover:bg-accent-soft ${Option.contains(maybeSelected, summary.ticker) ? 'bg-accent-soft' : ''}`,
+                ),
+              ],
+              [
+                h.td([h.Class('w-7 border-t border-line py-1.5 pl-4 text-muted')], [globalThis.String(index + 1)]),
                 h.td(
-                  [],
+                  [h.Class('border-t border-line px-4 py-1.5')],
                   [
                     h.a(
-                      [h.Href(`/t/${summary.ticker}`), h.Class('wl-link')],
-                      [h.span([h.Class('t')], [summary.ticker]), h.span([h.Class('n')], [summary.name])],
+                      [h.Href(`/t/${summary.ticker}`), h.Class('block')],
+                      [
+                        h.span([h.Class('font-mono font-semibold')], [summary.ticker]),
+                        h.span([h.Class('block max-w-40 truncate text-xs text-muted')], [summary.name]),
+                      ],
                     ),
                   ],
                 ),
-                h.td([h.Class('s')], [summary.rating === 'Excluded' ? '—' : formatScore(summary.total)]),
+                h.td(
+                  [h.Class('border-t border-line py-1.5 pr-4 text-right font-semibold tabular-nums')],
+                  [summary.rating === 'Excluded' ? '—' : formatScore(summary.total)],
+                ),
               ],
             ),
           ),
@@ -356,11 +376,14 @@ const watchlistView = (model: Model, h: HtmlBuilder<Message>): Html => {
   })
 
   return h.aside(
-    [],
+    [h.Class('order-2 md:order-none')],
     [
       h.div(
-        [h.Class('panel')],
-        [h.h2([], ['Ranked watchlist']), h.table([h.Class('wl')], [h.tbody([], rows)])],
+        [h.Class(`${PANEL} py-1.5`)],
+        [
+          h.h2([h.Class(`${LABEL} mx-4 my-2.5`)], ['Ranked watchlist']),
+          h.table([h.Class('w-full border-collapse')], [h.tbody([], rows)]),
+        ],
       ),
     ],
   )
@@ -374,70 +397,84 @@ const watchlistOrder: Order.Order<Summary> = Order.combine(
 
 const sortWatchlist = (rows: ReadonlyArray<Summary>): ReadonlyArray<Summary> => Array.sort(rows, watchlistOrder)
 
-const notice = (h: HtmlBuilder<Message>, text: string): Html => h.div([h.Class('notice')], [text])
+const notice = (h: HtmlBuilder<Message>, text: string): Html =>
+  h.div([h.Class('mx-6 mt-4 rounded-lg bg-mid-soft px-3.5 py-2.5 text-[13px]')], [text])
+
+const pill = (h: HtmlBuilder<Message>, text: string, tone: string): Html =>
+  h.span([h.Class(`mt-2 inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold ${tone}`)], [text])
 
 const cardHeadView = (card: Scorecard, isRefreshing: boolean, h: HtmlBuilder<Message>): Html =>
   h.div(
-    [h.Class('card-head')],
+    [h.Class('flex flex-wrap items-start justify-between gap-6 border-b border-line px-6 py-5')],
     [
       h.div(
         [],
         [
-          h.h2([], [`${card.ticker} · ${card.name}`]),
+          h.h2([h.Class('mb-1 text-[22px] font-semibold tracking-tight')], [`${card.ticker} · ${card.name}`]),
           h.div(
-            [h.Class('meta')],
+            [h.Class('text-[13px] text-muted')],
             [
               `SIC ${card.sic} ${card.sicDescription}`,
               h.br([]),
               `TTM to ${card.asOf} · latest FY ended ${card.latestFy} · computed ${new Date(card.computedAt).toLocaleString()}`,
             ],
           ),
-          h.div(
-            [h.Class('actions')],
+          h.button(
             [
-              h.button(
-                [h.Type('button'), h.Class('ghost'), h.Disabled(isRefreshing), h.OnClick(Message.ClickedRefresh())],
-                [isRefreshing ? 'Refreshing…' : 'Refresh from EDGAR'],
+              h.Type('button'),
+              h.Class(
+                'mt-2.5 cursor-pointer rounded-lg border border-line px-3.5 py-2 font-medium text-accent hover:bg-accent-soft disabled:cursor-default disabled:opacity-55',
               ),
+              h.Disabled(isRefreshing),
+              h.OnClick(Message.ClickedRefresh()),
             ],
+            [isRefreshing ? 'Refreshing…' : 'Refresh from EDGAR'],
           ),
         ],
       ),
       card.excluded === undefined
         ? h.div(
-            [h.Class('total')],
+            [h.Class('sm:text-right')],
             [
-              h.div([h.Class('big')], [formatScore(card.total), h.small([], [' / 100'])]),
-              h.span([h.Class(`pill ${ratingClass(card.rating)}`)], [card.rating]),
+              h.div(
+                [h.Class('text-[44px] leading-none font-bold tracking-tight tabular-nums')],
+                [formatScore(card.total), h.small([h.Class('text-lg font-medium text-muted')], [' / 100'])],
+              ),
+              pill(h, card.rating, ratingTone(card.rating)),
             ],
           )
-        : h.div([h.Class('total')], [h.span([h.Class('pill r-Excluded')], ['Excluded'])]),
+        : h.div([h.Class('sm:text-right')], [pill(h, 'Excluded', ratingTone('Excluded'))]),
     ],
   )
 
 const sectionSummaryView = (section: Section, h: HtmlBuilder<Message>): Html =>
   h.div(
-    [h.Class('sec-sum')],
+    [],
     [
-      h.div([h.Class('lbl')], [`${section.id}. ${section.name}`]),
-      h.div([h.Class('v')], [`${formatScore(section.points)} / ${section.max}`]),
+      h.div([h.Class('truncate text-xs text-muted')], [`${section.id}. ${section.name}`]),
+      h.div([h.Class('font-semibold tabular-nums')], [`${formatScore(section.points)} / ${section.max}`]),
       h.div(
-        [h.Class('bar')],
-        [h.i([h.Style({ width: `${Math.round((100 * section.points) / section.max)}%` })], [])],
+        [h.Class('mt-1 h-1.5 overflow-hidden rounded-full bg-track')],
+        [
+          h.i(
+            [h.Class('block h-full bg-accent'), h.Style({ width: `${Math.round((100 * section.points) / section.max)}%` })],
+            [],
+          ),
+        ],
       ),
     ],
   )
 
 const sourceView = (source: string, h: HtmlBuilder<Message>): Html =>
   Option.match(Option.fromNullishOr(source.match(/https:\/\/\S+/)), {
-    onNone: () => h.div([h.Class('note')], [`Source: ${source}`]),
+    onNone: () => h.div([h.Class('mt-1')], [`Source: ${source}`]),
     onSome: match => {
       const href = match[0]
       return h.div(
-        [h.Class('note')],
+        [h.Class('mt-1')],
         [
           `Source: ${source.slice(0, match.index)}`,
-          h.a([h.Href(href), h.Target('_blank'), h.Rel('noopener')], [href]),
+          h.a([h.Href(href), h.Target('_blank'), h.Rel('noopener'), h.Class('break-all text-accent underline')], [href]),
         ],
       )
     },
@@ -447,17 +484,25 @@ const metricDetailView = (metric: Metric, h: HtmlBuilder<Message>): Html => {
   const inputs = Record.toEntries(metric.inputs)
 
   return h.tr(
-    [h.Key(`${metric.id}-detail`), h.Class('detail')],
+    [h.Key(`${metric.id}-detail`)],
     [
       h.td(
-        [h.Colspan(4)],
+        [h.Colspan(4), h.Class('border-t border-line bg-canvas py-2.5 pr-6 pl-14 text-[13px] wrap-anywhere')],
         [
-          h.div([h.Class('f')], [metric.formula]),
+          h.div([h.Class('mb-1.5 text-muted')], [metric.formula]),
           Array.isArrayNonEmpty(inputs)
-            ? h.dl([], Array.flatMap(inputs, ([label, value]) => [h.dt([], [label]), h.dd([], [value])]))
+            ? h.dl(
+                [h.Class('my-1.5 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-0.5')],
+                Array.flatMap(inputs, ([label, value]) => [
+                  h.dt([h.Class('text-muted')], [label]),
+                  h.dd([h.Class('m-0 font-mono text-xs')], [value]),
+                ]),
+              )
             : h.empty,
-          metric.note === undefined ? h.empty : h.div([h.Class('note')], [metric.note]),
-          metric.evidence === undefined ? h.empty : h.blockquote([], [metric.evidence]),
+          metric.note === undefined ? h.empty : h.div([h.Class('mt-1')], [metric.note]),
+          metric.evidence === undefined
+            ? h.empty
+            : h.blockquote([h.Class('my-2 border-l-3 border-line px-2.5 py-1.5 text-xs text-muted')], [metric.evidence]),
           metric.source === undefined ? h.empty : sourceView(metric.source, h),
         ],
       ),
@@ -467,12 +512,31 @@ const metricDetailView = (metric: Metric, h: HtmlBuilder<Message>): Html => {
 
 const metricRowsView = (metric: Metric, isExpanded: boolean, h: HtmlBuilder<Message>): ReadonlyArray<Html> => [
   h.tr(
-    [h.Key(metric.id), h.Class('row'), h.OnClick(Message.ClickedMetric({ metricId: metric.id })), h.AriaExpanded(isExpanded)],
     [
-      h.td([], [metric.id]),
-      h.td([], [h.div([h.Class('name')], [metric.name]), h.div([h.Class('band')], [metric.band])]),
-      h.td([h.Class('val')], [metric.display]),
-      h.td([], [h.span([h.Class(`pts ${pointsClass(metric)}`)], [`${formatScore(metric.points)} / ${metric.max}`])]),
+      h.Key(metric.id),
+      h.Class(`cursor-pointer hover:bg-accent-soft ${isExpanded ? 'bg-accent-soft' : ''}`),
+      h.OnClick(Message.ClickedMetric({ metricId: metric.id })),
+      h.AriaExpanded(isExpanded),
+    ],
+    [
+      h.td([h.Class(`${CELL} pl-6 font-mono text-muted`)], [metric.id]),
+      h.td(
+        [h.Class(CELL)],
+        [
+          h.div([h.Class('font-medium')], [metric.name]),
+          h.div([h.Class('hidden text-xs whitespace-nowrap text-muted sm:block')], [metric.band]),
+        ],
+      ),
+      h.td([h.Class(`${CELL} tabular-nums wrap-anywhere`)], [metric.display]),
+      h.td(
+        [h.Class(`${CELL} pr-6 text-right whitespace-nowrap`)],
+        [
+          h.span(
+            [h.Class(`inline-block min-w-14 rounded-md px-2 py-0.5 text-center font-semibold tabular-nums ${pointsTone(metric)}`)],
+            [`${formatScore(metric.points)} / ${metric.max}`],
+          ),
+        ],
+      ),
     ],
   ),
   ...(isExpanded ? [metricDetailView(metric, h)] : []),
@@ -480,16 +544,19 @@ const metricRowsView = (metric: Metric, isExpanded: boolean, h: HtmlBuilder<Mess
 
 const sectionView = (section: Section, expandedMetricIds: ReadonlyArray<string>, h: HtmlBuilder<Message>): Html =>
   h.div(
-    [h.Class('section')],
+    [h.Class('border-b border-line pt-2 pb-1 last:border-b-0')],
     [
       h.div(
-        [h.Class('sec-title')],
+        [h.Class(`${LABEL} mx-6 mt-2.5 mb-1.5 flex justify-between`)],
         [h.span([], [`${section.id}. ${section.name}`]), h.span([], [`${formatScore(section.points)} / ${section.max}`])],
       ),
       h.table(
-        [h.Class('metrics')],
+        [h.Class('w-full table-fixed border-collapse')],
         [
-          h.colgroup([], [h.col([h.Class('c-id')]), h.col([]), h.col([h.Class('c-val')]), h.col([h.Class('c-pts')])]),
+          h.colgroup(
+            [],
+            [h.col([h.Class('w-14')]), h.col([]), h.col([h.Class('w-24 sm:w-36')]), h.col([h.Class('w-24 sm:w-28')])],
+          ),
           h.tbody(
             [],
             Array.flatMap(section.metrics, metric =>
@@ -523,7 +590,7 @@ const scorecardView = (
   })
 
   if (card.excluded !== undefined) {
-    return h.div([], [cardHeadView(card, isRefreshing, h), jobNotice, notice(h, card.excluded), h.div([h.Class('spacer')], [])])
+    return h.div([h.Class('pb-5')], [cardHeadView(card, isRefreshing, h), jobNotice, notice(h, card.excluded)])
   } else {
     const gateNotice = card.gated
       ? notice(
@@ -538,7 +605,10 @@ const scorecardView = (
         cardHeadView(card, isRefreshing, h),
         jobNotice,
         gateNotice,
-        h.div([h.Class('sections')], Array.map(card.sections, section => sectionSummaryView(section, h))),
+        h.div(
+          [h.Class('grid grid-cols-3 gap-2 border-b border-line px-6 py-4 md:grid-cols-6')],
+          Array.map(card.sections, section => sectionSummaryView(section, h)),
+        ),
         ...Array.map(card.sections, section => sectionView(section, expandedMetricIds, h)),
       ],
     )
@@ -546,7 +616,7 @@ const scorecardView = (
 }
 
 const status = (h: HtmlBuilder<Message>, text: string, isError = false): Html =>
-  h.div([h.Class(isError ? 'status err' : 'status'), h.AriaLive('polite')], [text])
+  h.div([h.Class(`px-6 py-10 ${isError ? 'text-bad' : 'text-muted'}`), h.AriaLive('polite')], [text])
 
 const companyView = (model: Model, h: HtmlBuilder<Message>): Html =>
   Company.match<Html>(model.company, {
@@ -593,14 +663,20 @@ export const view = (model: Model, h: HtmlBuilder<Message>): Document => ({
     [],
     [
       h.header(
-        [],
+        [h.Class('sticky top-0 z-10 flex flex-wrap items-center justify-between gap-4 border-b border-line bg-panel px-4 py-3 md:px-6')],
         [
-          h.h1([], [h.a([h.Href('/'), h.Class('home')], ['Monopoly Scorecard']), h.span([], [' · strict, filings-only'])]),
+          h.h1(
+            [h.Class('m-0 text-base font-semibold tracking-tight')],
+            [h.a([h.Href('/')], ['Monopoly Scorecard']), h.span([h.Class('font-normal text-muted')], [' · strict, filings-only'])],
+          ),
           h.form(
-            [h.OnSubmit(Message.SubmittedTickerForm())],
+            [h.Class('flex gap-2'), h.OnSubmit(Message.SubmittedTickerForm())],
             [
               h.input([
                 h.Type('text'),
+                h.Class(
+                  'w-44 rounded-lg border border-line bg-canvas px-2.5 py-2 uppercase focus:outline-2 focus:-outline-offset-1 focus:outline-accent',
+                ),
                 h.Value(model.tickerInput),
                 h.Placeholder('Ticker, e.g. NVDA'),
                 h.Autocomplete('off'),
@@ -609,22 +685,28 @@ export const view = (model: Model, h: HtmlBuilder<Message>): Document => ({
                 h.OnInput(value => Message.UpdatedTickerInput({ value })),
               ]),
               // Never disabled: a disabled default button blocks Enter-to-submit until the next render.
-              h.button([h.Type('submit')], ['Score']),
+              h.button(
+                [h.Type('submit'), h.Class('cursor-pointer rounded-lg bg-accent px-3.5 py-2 font-semibold text-white hover:opacity-90')],
+                ['Score'],
+              ),
             ],
           ),
         ],
       ),
       h.main(
-        [],
+        [h.Class('mx-auto grid max-w-7xl gap-6 p-4 md:grid-cols-[300px_minmax(0,1fr)] md:p-6')],
         [
           watchlistView(model, h),
           h.section(
-            [],
+            [h.Class('min-w-0')],
             [
-              h.div([h.Class('panel card')], [companyView(model, h)]),
+              h.div([h.Class(PANEL)], [companyView(model, h)]),
               h.details(
-                [h.Class('panel method')],
-                [h.summary([], ['Methodology and interpretation rules']), h.ul([], Array.map(METHODOLOGY, item => h.li([], [item])))],
+                [h.Class(`${PANEL} mt-6 px-6 pb-4`)],
+                [
+                  h.summary([h.Class('cursor-pointer py-3 font-semibold')], ['Methodology and interpretation rules']),
+                  h.ul([h.Class('list-disc space-y-1 pl-5')], Array.map(METHODOLOGY, item => h.li([], [item]))),
+                ],
               ),
             ],
           ),
