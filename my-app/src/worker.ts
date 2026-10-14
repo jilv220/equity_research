@@ -14,6 +14,22 @@ const ERROR_BACKOFF_MS = 10 * 60_000;
 const PACE_BATCH = 10;
 const PACE_DELAY = "10 seconds";
 const ACTIVE = new Set(["queued", "running", "paused", "waiting", "waitingForPause", "unknown"]);
+const TERMINAL = new Set(["complete", "errored", "terminated"]);
+
+/**
+ * Edge cache (Workers Cache) for reads. Scores only change when a job writes a new one, and every
+ * write purges the tags below, so the edge can hold responses for a long time. Browsers always
+ * revalidate (max-age=0) so they never show a score the edge has already replaced. The TTL only
+ * bounds staleness if a purge is ever missed.
+ */
+const EDGE_TTL_S = 6 * 3600;
+const WATCHLIST_TAG = "watchlist";
+const scoreTag = (t: string) => `score:${t}`;
+const cacheFor = (tags: string[]) => ({
+  "cache-control": `public, max-age=0, s-maxage=${EDGE_TTL_S}`,
+  "cache-tag": tags.join(","),
+});
+const NO_STORE = { "cache-control": "no-store" };
 
 interface Summary {
   ticker: string;
@@ -29,13 +45,25 @@ interface Summary {
 interface Job {
   id: string;
   startedAt: string;
+  /** Saved once the job reaches a terminal state, so later reads skip the Workflow status call. */
+  status?: string;
+  error?: string;
 }
 
-const json = (body: unknown, status = 200) =>
+const json = (body: unknown, status = 200, headers: Record<string, string> = NO_STORE) =>
   new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    headers: { "content-type": "application/json; charset=utf-8", ...headers },
   });
+
+/** Drop cached reads that show `ticker`'s score and the watchlist. Best effort: the TTL is the backstop. */
+async function purgeScore(cache: CacheContext | undefined, ticker: string) {
+  try {
+    await cache?.purge({ tags: [scoreTag(ticker), WATCHLIST_TAG] });
+  } catch (e) {
+    console.warn(`cache purge failed for ${ticker}`, e);
+  }
+}
 
 const normalize = (ticker: string) => ticker.trim().toUpperCase().replace(/\./g, "-");
 const scoreKey = (t: string) => `scores/${t}.json`;
@@ -147,14 +175,39 @@ export class ScoreWorkflow extends WorkflowEntrypoint<WorkerEnv, ScoreParams> {
         await env.Bucket.put(scoreKey(ticker), JSON.stringify(card), {
           customMetadata: { summary: JSON.stringify(summary) },
         });
+        const job = await readJson<Job>(env.Bucket, jobKey(ticker));
+        if (job?.value.id === event.instanceId) {
+          await env.Bucket.put(jobKey(ticker), JSON.stringify({ ...job.value, status: "complete" }));
+        }
+        await purgeScore(this.ctx.cache, ticker);
         return summary;
       },
     );
   }
 }
 
+/**
+ * The job's current state. A terminal state saved in R2 is used as is; otherwise the Workflow is asked,
+ * and the first time a job is seen finished its state is saved and the cached reads are purged.
+ */
+async function jobState(env: WorkerEnv, ctx: ExecutionContext, ticker: string, job: Job): Promise<Job & { status: string }> {
+  if (job.status && TERMINAL.has(job.status)) return { ...job, status: job.status };
+  try {
+    const st = await (await env.SCORE_WORKFLOW.get(job.id)).status();
+    const next = { ...job, status: st.status, error: st.error?.message.replace(/^NonRetryableError:\s*/, "") };
+    if (TERMINAL.has(st.status)) {
+      await env.Bucket.put(jobKey(ticker), JSON.stringify(next));
+      // Awaited, not waitUntil: the UI refetches the watchlist as soon as this poll reports completion.
+      await purgeScore(ctx.cache, ticker);
+    }
+    return next;
+  } catch {
+    return { ...job, status: "unknown" };
+  }
+}
+
 export default {
-  async fetch(request: Request, env: WorkerEnv): Promise<Response> {
+  async fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -163,43 +216,39 @@ export default {
 
     if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
 
-    // GET /api/score/:ticker[?refresh=1]
+    // GET /api/score/:ticker[?refresh=1 | ?job=<id>]
     // Returns the stored scorecard (if any) and the background job's state, starting a job when the
-    // score is missing, stale, or a refresh was asked for. The UI polls this until the job finishes.
+    // score is missing, stale, or a refresh was asked for. A settled score is edge-cached; while a job
+    // runs the UI polls with ?job=<id>, a separate URL that is never cached.
     const m = path.match(/^\/api\/score\/([A-Za-z0-9.\-]{1,10})$/);
     if (m) {
       const ticker = normalize(m[1]!);
       const refresh = url.searchParams.get("refresh") === "1";
+      const isPoll = url.searchParams.has("job");
       const [card, prev] = await Promise.all([
         readJson<Scorecard>(env.Bucket, scoreKey(ticker)),
         readJson<Job>(env.Bucket, jobKey(ticker)),
       ]);
 
-      let job: (Job & { status: string; error?: string }) | null = null;
-      if (prev) {
-        try {
-          const st = await (await env.SCORE_WORKFLOW.get(prev.value.id)).status();
-          job = { ...prev.value, status: st.status, error: st.error?.message.replace(/^NonRetryableError:\s*/, "") };
-        } catch {
-          job = { ...prev.value, status: "unknown" };
-        }
-      }
+      let job = prev ? await jobState(env, ctx, ticker, prev.value) : null;
       const active = job !== null && ACTIVE.has(job.status) && Date.now() - Date.parse(job.startedAt) < HOUR;
       const recentFailure =
         job?.status === "errored" && Date.now() - Date.parse(job.startedAt) < ERROR_BACKOFF_MS && !refresh;
       const stale = !card || Date.now() - card.uploaded.getTime() > STALE_MS;
 
-      if (!active && !recentFailure && (refresh || stale)) {
+      // Polls only report progress; they never start another job.
+      if (!isPoll && !active && !recentFailure && (refresh || stale)) {
         job = { ...(await startJob(env, ticker, refresh)), status: "queued" };
       }
-      return json({ ticker, card: card?.value ?? null, job });
+      const isSettled = !refresh && !isPoll && !stale && !(job && ACTIVE.has(job.status));
+      return json({ ticker, card: card?.value ?? null, job }, 200, isSettled ? cacheFor([scoreTag(ticker)]) : NO_STORE);
     }
 
     // GET /api/scores — every scored company, ranked by score, ties broken by TTM ROIC.
     if (path === "/api/scores") {
       const rows = await watchlist(env.Bucket);
       rows.sort((a, b) => b.total - a.total || (b.ttmRoic ?? -Infinity) - (a.ttmRoic ?? -Infinity));
-      return json(rows);
+      return json(rows, 200, cacheFor([WATCHLIST_TAG]));
     }
 
     return json({ error: "Not found" }, 404);

@@ -28,6 +28,8 @@ export const Worker = Cloudflare.Website.Foldkit("Worker", {
   main: "./src/worker.ts",
   env: { Bucket, SEC_USER_AGENT, SCORE_WORKFLOW: ScoreWorkflow },
   assets: { runWorkerFirst: ["/api/*"] },
+  // Edge-cache /api reads; responses opt in with Cache-Control and are purged by Cache-Tag on re-score.
+  cache: { enabled: true, crossVersionCache: true },
 });
 
 export type WorkerEnv = Cloudflare.InferEnv<typeof Worker>;

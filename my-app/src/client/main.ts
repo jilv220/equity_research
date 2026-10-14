@@ -38,6 +38,17 @@ export const Company = defineTaggedUnion({
 })
 export type Company = typeof Company.Type
 
+/**
+ * What a score request asks the API for. `View` may be served from the edge cache; `Refresh` starts a
+ * fresh job; `Poll` checks on a running job through a never-cached URL.
+ */
+export const ScoreQuery = defineTaggedUnion({
+  View: {},
+  Refresh: {},
+  Poll: { jobId: Schema.String },
+})
+export type ScoreQuery = typeof ScoreQuery.Type
+
 export const Model = Schema.Struct({
   route: AppRoute,
   tickerInput: Schema.String,
@@ -63,7 +74,7 @@ export const Message = defineMessageUnion({
   CompletedScrollToTop: {},
   SucceededFetchScore: { requestId: Schema.Number, pollCount: Schema.Number, response: ScoreResponse },
   FailedFetchScore: { requestId: Schema.Number, ticker: Schema.String, error: Schema.String },
-  CompletedWaitBeforePoll: { requestId: Schema.Number, ticker: Schema.String, pollCount: Schema.Number },
+  CompletedWaitBeforePoll: { requestId: Schema.Number, ticker: Schema.String, jobId: Schema.String, pollCount: Schema.Number },
   SucceededFetchWatchlist: { rows: Watchlist },
   FailedFetchWatchlist: { error: Schema.String },
 })
@@ -87,16 +98,20 @@ const errorMessage = (body: unknown, status: number) =>
 export const FetchScore = Command.define('FetchScore', {
   args: {
     ticker: Schema.String,
-    isRefresh: Schema.Boolean,
+    query: ScoreQuery,
     requestId: Schema.Number,
     pollCount: Schema.Number,
   },
   messages: [Message.SucceededFetchScore, Message.FailedFetchScore],
-  execute: ({ ticker, isRefresh, requestId, pollCount }) =>
+  execute: ({ ticker, query, requestId, pollCount }) =>
     Effect.gen(function* () {
       const client = yield* HttpClient.HttpClient
-      const query = isRefresh ? '?refresh=1' : ''
-      const response = yield* client.get(`/api/score/${encodeURIComponent(ticker)}${query}`)
+      const search = ScoreQuery.match<string>(query, {
+        View: () => '',
+        Refresh: () => '?refresh=1',
+        Poll: ({ jobId }) => `?job=${encodeURIComponent(jobId)}`,
+      })
+      const response = yield* client.get(`/api/score/${encodeURIComponent(ticker)}${search}`)
       const body = yield* response.json
 
       if (response.status !== 200) {
@@ -114,11 +129,11 @@ export const FetchScore = Command.define('FetchScore', {
 })
 
 export const WaitBeforePoll = Command.define('WaitBeforePoll', {
-  args: { requestId: Schema.Number, ticker: Schema.String, pollCount: Schema.Number },
+  args: { requestId: Schema.Number, ticker: Schema.String, jobId: Schema.String, pollCount: Schema.Number },
   messages: [Message.CompletedWaitBeforePoll],
-  execute: ({ requestId, ticker, pollCount }) =>
+  execute: ({ requestId, ticker, jobId, pollCount }) =>
     Effect.sleep(Duration.millis(Math.min(POLL_BASE_MS + pollCount * POLL_STEP_MS, POLL_MAX_MS))).pipe(
-      Effect.as(Message.CompletedWaitBeforePoll({ requestId, ticker, pollCount })),
+      Effect.as(Message.CompletedWaitBeforePoll({ requestId, ticker, jobId, pollCount })),
     ),
 })
 
@@ -160,7 +175,7 @@ export const ScrollToTop = Command.define('ScrollToTop', {
 type UpdateReturn = Update.Return<Model, Message>
 
 /** Starts a new score request chain for `ticker`, superseding any chain still polling. */
-const startFetchScore = (model: Model, ticker: string, isRefresh: boolean, nextCompany: Company): UpdateReturn => {
+const startFetchScore = (model: Model, ticker: string, query: ScoreQuery, nextCompany: Company): UpdateReturn => {
   const nextRequestId = model.requestId + 1
 
   return {
@@ -168,7 +183,7 @@ const startFetchScore = (model: Model, ticker: string, isRefresh: boolean, nextC
       company: () => nextCompany,
       requestId: () => nextRequestId,
     }),
-    commands: [FetchScore({ ticker, isRefresh, requestId: nextRequestId, pollCount: 0 })],
+    commands: [FetchScore({ ticker, query, requestId: nextRequestId, pollCount: 0 })],
   }
 }
 
@@ -180,7 +195,7 @@ const enterRoute = (model: Model, route: AppRoute): UpdateReturn => {
     NotFound: () => ({ model: modifyFields(routed, { company: () => Company.NotSelected() }) }),
     Company: ({ ticker }) => {
       const nextTicker = normalizeTicker(ticker)
-      return startFetchScore(routed, nextTicker, false, Company.Loading({ ticker: nextTicker }))
+      return startFetchScore(routed, nextTicker, ScoreQuery.View(), Company.Loading({ ticker: nextTicker }))
     },
   })
 }
@@ -245,7 +260,7 @@ export const update = (model: Model, message: Message) =>
     ClickedRefresh: () =>
       Option.match(currentTicker(model.company), {
         onNone: () => ({ model }),
-        onSome: ticker => startFetchScore(model, ticker, true, model.company),
+        onSome: ticker => startFetchScore(model, ticker, ScoreQuery.Refresh(), model.company),
       }),
 
     ClickedMetric: ({ metricId }) => ({
@@ -279,11 +294,14 @@ export const update = (model: Model, message: Message) =>
       }
 
       const nextCompany = loadedFromResponse(response, pollCount)
-      const isRunning = Option.exists(response.job, isJobActive)
+      const maybeRunningJob = Option.filter(response.job, isJobActive)
       const nextModel = modifyFields(model, { company: () => nextCompany })
 
-      if (isRunning) {
-        return { model: nextModel, commands: [WaitBeforePoll({ requestId, ticker: response.ticker, pollCount })] }
+      if (Option.isSome(maybeRunningJob)) {
+        return {
+          model: nextModel,
+          commands: [WaitBeforePoll({ requestId, ticker: response.ticker, jobId: maybeRunningJob.value.id, pollCount })],
+        }
       } else if (pollCount > 0) {
         // A background job just finished: the watchlist has a new or updated row.
         return { model: nextModel, commands: [FetchWatchlist()] }
@@ -300,11 +318,14 @@ export const update = (model: Model, message: Message) =>
       }
     },
 
-    CompletedWaitBeforePoll: ({ requestId, ticker, pollCount }) => {
+    CompletedWaitBeforePoll: ({ requestId, ticker, jobId, pollCount }) => {
       if (requestId !== model.requestId) {
         return { model }
       } else {
-        return { model, commands: [FetchScore({ ticker, isRefresh: false, requestId, pollCount: pollCount + 1 })] }
+        return {
+          model,
+          commands: [FetchScore({ ticker, query: ScoreQuery.Poll({ jobId }), requestId, pollCount: pollCount + 1 })],
+        }
       }
     },
 
