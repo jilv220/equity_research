@@ -713,7 +713,7 @@ export const view = (model: Model, h: HtmlBuilder<Message>): Document => ({
               h.input([
                 h.Type('text'),
                 h.Class(
-                  'w-44 rounded-lg border border-line bg-canvas px-2.5 py-2 uppercase focus:outline-2 focus:-outline-offset-1 focus:outline-accent',
+                  'w-44 rounded-lg border border-line bg-canvas px-2.5 py-2 text-base uppercase sm:text-sm focus:outline-2 focus:-outline-offset-1 focus:outline-accent',
                 ),
                 h.Value(model.tickerInput),
                 h.Placeholder('Ticker, e.g. NVDA'),
