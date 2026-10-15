@@ -1,0 +1,71 @@
+# Pull requests: typecheck only. Pushes to master: typecheck, then deploy the `prod` stage.
+# Follows https://alchemy.run/environments/ci/ without per-PR preview stages.
+#
+# Repo secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   API token for the account (needs Secrets Store Write, plus Workers,
+#                          Workers R2 Storage and Workflows edit; Alchemy's state store needs the
+#                          Secrets Store permission)
+#   CLOUDFLARE_ACCOUNT_ID  the account to deploy into
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# One run per ref at a time; never cancel a deploy halfway through.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: my-app
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: my-app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+
+  deploy:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: my-app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Check Cloudflare credentials
+        run: pnpm exec alchemy provider check-env --provider cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Deploy
+        run: pnpm exec alchemy deploy --stage prod
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
