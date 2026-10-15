@@ -4,6 +4,8 @@ import { NonRetryableError } from "cloudflare:workflows";
 import type { ScoreParams, WorkerEnv } from "../alchemy.run.ts";
 import { edgar, EdgarError, type Cache } from "./scoring/edgar.ts";
 import type { Scorecard } from "./scoring/score.ts";
+import { valuationSeries } from "./valuation/multiples.ts";
+import { fetchDailyPrices, parseDailyPrices, PriceError } from "./valuation/prices.ts";
 
 const HOUR = 3_600_000;
 /** Scores older than this are re-queued when viewed (the nightly run normally keeps them fresh). */
@@ -73,6 +75,8 @@ async function purgeScore(cache: CacheContext | undefined, ticker: string, from:
 const normalize = (ticker: string) => ticker.trim().toUpperCase().replace(/\./g, "-");
 const scoreKey = (t: string) => `scores/${t}.json`;
 const jobKey = (t: string) => `jobs/${t}.json`;
+const valuationKey = (t: string) => `valuation/${t}.json`;
+const pricesKey = (t: string) => `prices/${t}.json`;
 
 const r2Cache = (bucket: R2Bucket): Cache => ({
   async get(key, maxAgeMs) {
@@ -170,8 +174,27 @@ export class ScoreWorkflow extends WorkflowEntrypoint<WorkerEnv, ScoreParams> {
       },
     );
 
+    // Network only: daily prices for the valuation panel. Best effort — the scorecard never depends on
+    // them, so a price-source outage leaves the previous valuation in place instead of failing the job.
+    const hasPrices = await step.do(
+      "fetch prices",
+      { retries: { limit: 3, delay: "20 seconds", backoff: "exponential" }, timeout: "2 minutes" },
+      async () => {
+        try {
+          await env.Bucket.put(pricesKey(fetched.ticker), await fetchDailyPrices(fetched.ticker));
+          return true;
+        } catch (e) {
+          if (e instanceof PriceError && e.status === 404) return false;
+          throw e;
+        }
+      },
+    ).catch((e) => {
+      console.warn(`price fetch failed for ${ticker}`, e);
+      return false;
+    });
+
     // CPU: parse XBRL + filing text and compute the scorecard. Reads only from the R2 cache.
-    return await step.do(
+    const scored = await step.do(
       "score",
       { retries: { limit: 2, delay: "10 seconds", backoff: "constant" }, timeout: "5 minutes" },
       async () => {
@@ -180,15 +203,32 @@ export class ScoreWorkflow extends WorkflowEntrypoint<WorkerEnv, ScoreParams> {
         await env.Bucket.put(scoreKey(ticker), JSON.stringify(card), {
           customMetadata: { summary: JSON.stringify(summary) },
         });
-        // ctx.cache isn't available inside a Workflow, so purge through this Worker's own fetch handler.
-        try {
-          await env.SELF.fetch(`https://self/api/purge/${encodeURIComponent(ticker)}`);
-        } catch (e) {
-          console.warn(`cache purge request failed for ${ticker}`, e);
-        }
-        return summary;
+        return { summary, excluded: card.excluded !== undefined };
       },
     );
+
+    // CPU: daily P/E, P/B, P/S history. Skipped for excluded companies (banks, insurers, …), whose
+    // book values and share classes these multiples don't handle.
+    if (hasPrices && !scored.excluded) {
+      await step.do("valuation", { retries: { limit: 1, delay: "10 seconds" }, timeout: "5 minutes" }, async () => {
+        const body = await env.Bucket.get(pricesKey(fetched.ticker));
+        if (!body) return false;
+        const series = valuationSeries(fetched.ticker, await sec.companyFacts(fetched.ticker), parseDailyPrices(await body.text()));
+        await env.Bucket.put(valuationKey(ticker), JSON.stringify(series));
+        return true;
+      }).catch((e) => console.warn(`valuation failed for ${ticker}`, e));
+    }
+
+    // ctx.cache isn't available inside a Workflow, so purge through this Worker's own fetch handler.
+    await step.do("purge cache", async () => {
+      try {
+        await env.SELF.fetch(`https://self/api/purge/${encodeURIComponent(ticker)}`);
+      } catch (e) {
+        console.warn(`cache purge request failed for ${ticker}`, e);
+      }
+      return true;
+    });
+    return scored.summary;
   }
 }
 
@@ -248,6 +288,18 @@ export default {
       }
       const isSettled = !refresh && !isPoll && !stale && !(job && ACTIVE.has(job.status));
       return json({ ticker, card: card?.value ?? null, job }, 200, isSettled ? cacheFor([scoreTag(ticker)]) : NO_STORE);
+    }
+
+    // GET /api/valuation/:ticker — daily P/E, P/B, P/S history written by the ScoreWorkflow. Shares the
+    // score's cache tag, so the purge after each re-score drops it too.
+    const val = path.match(/^\/api\/valuation\/([A-Za-z0-9.\-]{1,10})$/);
+    if (val) {
+      const ticker = normalize(val[1]!);
+      const obj = await env.Bucket.get(valuationKey(ticker));
+      if (!obj) return json({ error: `No valuation history for ${ticker} yet.` }, 404, cacheFor([scoreTag(ticker)]));
+      return new Response(obj.body, {
+        headers: { "content-type": "application/json; charset=utf-8", ...cacheFor([scoreTag(ticker)]) },
+      });
     }
 
     // GET /api/purge/:ticker — drops the cached reads for one company and the watchlist. Called by the

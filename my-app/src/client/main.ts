@@ -16,14 +16,25 @@ import {
   Scorecard,
   Section,
   Summary,
+  Valuation,
   Watchlist,
   isJobActive,
 } from './api'
 import { AppRoute, urlToAppRoute } from './route'
+import {
+  type Breakdown,
+  type Multiple,
+  type SeriesKey,
+  VALUATION_WINDOWS,
+  type ValuationWindow,
+  breakdown,
+  valuationBand,
+} from './valuation'
 
 // MODEL
 
 export const WatchlistAsyncData = AsyncData.Schema(Watchlist, Schema.String)
+export const ValuationAsyncData = AsyncData.Schema(Valuation, Schema.String)
 
 export const Company = defineTaggedUnion({
   NotSelected: {},
@@ -57,6 +68,10 @@ export const Model = Schema.Struct({
   expandedMetricIds: Schema.Array(Schema.String),
   // Identifies the current score request chain; results from an older chain are ignored.
   requestId: Schema.Number,
+  valuation: ValuationAsyncData.schema,
+  valuationWindow: Schema.Literals(VALUATION_WINDOWS),
+  // Chart series the reader has toggled off in the legend.
+  hiddenValuationSeries: Schema.Array(Schema.String),
 })
 export type Model = typeof Model.Type
 
@@ -77,6 +92,10 @@ export const Message = defineMessageUnion({
   CompletedWaitBeforePoll: { requestId: Schema.Number, ticker: Schema.String, jobId: Schema.String, pollCount: Schema.Number },
   SucceededFetchWatchlist: { rows: Watchlist },
   FailedFetchWatchlist: { error: Schema.String },
+  SucceededFetchValuation: { ticker: Schema.String, valuation: Valuation },
+  FailedFetchValuation: { ticker: Schema.String, error: Schema.String },
+  ClickedValuationWindow: { window: Schema.Literals(VALUATION_WINDOWS) },
+  ClickedValuationSeries: { series: Schema.String },
 })
 export type Message = typeof Message.Type
 
@@ -150,6 +169,29 @@ export const FetchWatchlist = Command.define('FetchWatchlist', {
   ),
 })
 
+export const FetchValuation = Command.define('FetchValuation', {
+  args: { ticker: Schema.String },
+  messages: [Message.SucceededFetchValuation, Message.FailedFetchValuation],
+  execute: ({ ticker }) =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient
+      const response = yield* client.get(`/api/valuation/${encodeURIComponent(ticker)}`)
+      const body = yield* response.json
+
+      if (response.status !== 200) {
+        return Message.FailedFetchValuation({ ticker, error: errorMessage(body, response.status) })
+      }
+
+      const valuation = yield* Schema.decodeUnknownEffect(Valuation)(body)
+      return Message.SucceededFetchValuation({ ticker, valuation })
+    }).pipe(
+      Effect.catch(() =>
+        Effect.succeed(Message.FailedFetchValuation({ ticker, error: "Couldn't load the valuation history." })),
+      ),
+      Effect.provide(Http.layer),
+    ),
+})
+
 export const NavigateInternal = Command.define('NavigateInternal', {
   args: { url: Schema.String },
   messages: [Message.CompletedNavigateInternal],
@@ -190,12 +232,20 @@ const startFetchScore = (model: Model, ticker: string, query: ScoreQuery, nextCo
 const enterRoute = (model: Model, route: AppRoute): UpdateReturn => {
   const routed = modifyFields(model, { route: () => route, expandedMetricIds: () => [] })
 
+  const cleared: Model = modifyFields(routed, { valuation: () => ValuationAsyncData.Idle() })
+
   return AppRoute.match<UpdateReturn>(route, {
-    Home: () => ({ model: modifyFields(routed, { company: () => Company.NotSelected() }) }),
-    NotFound: () => ({ model: modifyFields(routed, { company: () => Company.NotSelected() }) }),
+    Home: () => ({ model: modifyFields(cleared, { company: () => Company.NotSelected() }) }),
+    NotFound: () => ({ model: modifyFields(cleared, { company: () => Company.NotSelected() }) }),
     Company: ({ ticker }) => {
       const nextTicker = normalizeTicker(ticker)
-      return startFetchScore(routed, nextTicker, ScoreQuery.View(), Company.Loading({ ticker: nextTicker }))
+      const scoring = startFetchScore(
+        modifyFields(cleared, { valuation: () => ValuationAsyncData.Loading() }),
+        nextTicker,
+        ScoreQuery.View(),
+        Company.Loading({ ticker: nextTicker }),
+      )
+      return { model: scoring.model, commands: [...(scoring.commands ?? []), FetchValuation({ ticker: nextTicker })] }
     },
   })
 }
@@ -208,6 +258,9 @@ export const init: Runtime.RoutingApplicationInit<Model, Message> = (url: Url) =
     company: Company.NotSelected(),
     expandedMetricIds: [],
     requestId: 0,
+    valuation: ValuationAsyncData.Idle(),
+    valuationWindow: '10Y',
+    hiddenValuationSeries: ['pe', 'pb', 'ps'],
   }
   const entered = enterRoute(initial, urlToAppRoute(url))
 
@@ -303,8 +356,9 @@ export const update = (model: Model, message: Message) =>
           commands: [WaitBeforePoll({ requestId, ticker: response.ticker, jobId: maybeRunningJob.value.id, pollCount })],
         }
       } else if (pollCount > 0) {
-        // A background job just finished: the watchlist has a new or updated row.
-        return { model: nextModel, commands: [FetchWatchlist()] }
+        // A background job just finished: the watchlist has a new or updated row, and the job also
+        // rewrote the valuation history.
+        return { model: nextModel, commands: [FetchWatchlist(), FetchValuation({ ticker: response.ticker })] }
       } else {
         return { model: nextModel }
       }
@@ -335,6 +389,28 @@ export const update = (model: Model, message: Message) =>
 
     FailedFetchWatchlist: ({ error }) => ({
       model: modifyFields(model, { watchlist: () => WatchlistAsyncData.Failure({ error }) }),
+    }),
+
+    // Responses for a company the reader has since left are dropped.
+    SucceededFetchValuation: ({ ticker, valuation }) =>
+      Option.contains(currentTicker(model.company), ticker)
+        ? { model: modifyFields(model, { valuation: () => ValuationAsyncData.Success({ data: valuation }) }) }
+        : { model },
+
+    FailedFetchValuation: ({ ticker, error }) =>
+      Option.contains(currentTicker(model.company), ticker)
+        ? { model: modifyFields(model, { valuation: () => ValuationAsyncData.Failure({ error }) }) }
+        : { model },
+
+    ClickedValuationWindow: ({ window }) => ({
+      model: modifyFields(model, { valuationWindow: () => window }),
+    }),
+
+    ClickedValuationSeries: ({ series }) => ({
+      model: modifyFields(model, {
+        hiddenValuationSeries: hidden =>
+          Array.contains(hidden, series) ? Array.filter(hidden, s => s !== series) : Array.append(hidden, series),
+      }),
     }),
   })
 
@@ -680,6 +756,209 @@ const companyView = (model: Model, h: HtmlBuilder<Message>): Html =>
       }),
   })
 
+// VALUATION
+
+const TONE_TEXT = { good: 'text-good', muted: 'text-muted', mid: 'text-mid', bad: 'text-bad' } as const
+
+const CHART_SERIES: ReadonlyArray<{ key: SeriesKey; label: string; stroke: string; ring: string }> = [
+  { key: 'composite', label: 'Composite', stroke: 'stroke-accent', ring: 'border-accent' },
+  { key: 'pe', label: 'P/E', stroke: 'stroke-good', ring: 'border-good' },
+  { key: 'pb', label: 'P/B', stroke: 'stroke-mid', ring: 'border-mid' },
+  { key: 'ps', label: 'P/S', stroke: 'stroke-bad', ring: 'border-bad' },
+]
+
+const MULTIPLE_TITLE: Record<Multiple, string> = { pe: 'P/E (TTM)', pb: 'P/B', ps: 'P/S (TTM)' }
+
+const formatMonth = (date: string) =>
+  new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+
+const percentileCard = (
+  h: HtmlBuilder<Message>,
+  title: string,
+  percentile: number | null,
+  value: Option.Option<string>,
+  unavailable: string,
+): Html =>
+  h.div(
+    [h.Class('rounded-lg border border-line px-4 py-3')],
+    percentile === null
+      ? [
+          h.div([h.Class(LABEL)], [title]),
+          h.div([h.Class('mt-1 text-2xl font-semibold text-muted')], ['n/a']),
+          ...Option.match(value, { onNone: () => [], onSome: v => [h.div([h.Class('tabular-nums text-muted')], [v])] }),
+          h.div([h.Class('text-xs text-muted')], [unavailable]),
+        ]
+      : [
+          h.div([h.Class(LABEL)], [title]),
+          h.div(
+            [h.Class(`mt-1 text-2xl font-semibold tabular-nums ${TONE_TEXT[valuationBand(percentile).tone]}`)],
+            [`${percentile.toFixed(1)}%`],
+          ),
+          ...Option.match(value, { onNone: () => [], onSome: v => [h.div([h.Class('tabular-nums text-muted')], [v])] }),
+          h.div([h.Class(`text-xs font-semibold ${TONE_TEXT[valuationBand(percentile).tone]}`)], [valuationBand(percentile).label]),
+        ],
+  )
+
+const CHART = { width: 400, height: 220, left: 34, right: 6, top: 8, bottom: 20 }
+
+const percentileChart = (b: Breakdown, hidden: ReadonlyArray<string>, h: HtmlBuilder<Message>): Html => {
+  const n = b.chart.dates.length
+  const plotWidth = CHART.width - CHART.left - CHART.right
+  const plotHeight = CHART.height - CHART.top - CHART.bottom
+  const x = (i: number) => CHART.left + (n <= 1 ? plotWidth : (i / (n - 1)) * plotWidth)
+  const y = (p: number) => CHART.top + (1 - p / 100) * plotHeight
+
+  const grid = Array.flatMap([0, 25, 50, 75, 100], p => [
+    h.line([h.X1(`${CHART.left}`), h.X2(`${CHART.width - CHART.right}`), h.Y1(`${y(p)}`), h.Y2(`${y(p)}`), h.Class('stroke-line')], []),
+    h.text(
+      [h.X(`${CHART.left - 6}`), h.Y(`${y(p) + 3}`), h.TextAnchor('end'), h.Class('fill-muted text-[11px]')],
+      [`${p}%`],
+    ),
+  ])
+
+  const ticks = n === 0 ? [] : Array.dedupe([0, Math.floor((n - 1) / 2), n - 1])
+  const xLabels = Array.map(ticks, (i, k) =>
+    h.text(
+      [
+        h.X(`${x(i)}`),
+        h.Y(`${CHART.height - 6}`),
+        h.TextAnchor(k === 0 ? 'start' : k === ticks.length - 1 ? 'end' : 'middle'),
+        h.Class('fill-muted text-[11px]'),
+      ],
+      [formatMonth(b.chart.dates[i]!)],
+    ),
+  )
+
+  // One polyline per unbroken run, so gaps (not enough history, negative earnings) stay gaps.
+  const lines = Array.flatMap(
+    CHART_SERIES.filter(s => !Array.contains(hidden, s.key)),
+    s => {
+      const runs: string[][] = [[]]
+      b.chart.series[s.key].forEach((p, i) => {
+        if (p === null) runs.push([])
+        else runs[runs.length - 1]!.push(`${x(i).toFixed(1)},${y(p).toFixed(1)}`)
+      })
+      return runs
+        .filter(run => run.length > 1)
+        .map(run =>
+          h.polyline(
+            [h.Points(run.join(' ')), h.Fill('none'), h.StrokeWidth('1.5'), h.StrokeLinejoin('round'), h.Class(s.stroke)],
+            [],
+          ),
+        )
+    },
+  )
+
+  return h.svg(
+    [
+      h.ViewBox(`0 0 ${CHART.width} ${CHART.height}`),
+      h.Class('h-auto w-full'),
+      h.Role('img'),
+      h.AriaLabel('Valuation percentile over time (0 = cheapest, 100 = most expensive)'),
+    ],
+    [...grid, ...xLabels, ...lines],
+  )
+}
+
+const valuationBody = (valuation: Valuation, model: Model, h: HtmlBuilder<Message>): Html => {
+  const b = breakdown(valuation, model.valuationWindow)
+  if (b === null) return h.p([h.Class('text-muted')], ['No price history available.'])
+
+  const windowButtons = h.div(
+    [h.Class('flex flex-wrap gap-2'), h.Role('group'), h.AriaLabel('Lookback window')],
+    Array.map(VALUATION_WINDOWS, window =>
+      h.button(
+        [
+          h.Type('button'),
+          h.AriaPressed(globalThis.String(window === model.valuationWindow)),
+          h.OnClick(Message.ClickedValuationWindow({ window })),
+          h.Class(
+            `cursor-pointer rounded-lg border px-3 py-1.5 font-semibold ${window === model.valuationWindow ? 'border-accent bg-accent-soft text-accent' : 'border-line text-muted hover:text-ink'}`,
+          ),
+        ],
+        [window],
+      ),
+    ),
+  )
+
+  const multipleCard = (m: Multiple) => {
+    const r = b.readings[m]
+    return percentileCard(
+      h,
+      MULTIPLE_TITLE[m],
+      r.percentile,
+      r.value === null ? Option.none() : Option.some(r.value.toFixed(2)),
+      r.value === null ? 'Not meaningful (≤ 0)' : 'Not enough history',
+    )
+  }
+
+  const legend = h.div(
+    [h.Class('flex flex-wrap gap-x-4 gap-y-2')],
+    Array.map(CHART_SERIES, s => {
+      const isHidden = Array.contains(model.hiddenValuationSeries, s.key)
+      return h.button(
+        [
+          h.Type('button'),
+          h.AriaPressed(globalThis.String(!isHidden)),
+          h.OnClick(Message.ClickedValuationSeries({ series: s.key })),
+          h.Class(`flex cursor-pointer items-center gap-1.5 ${isHidden ? 'text-muted line-through' : 'text-ink'}`),
+        ],
+        [h.span([h.Class(`inline-block size-3 rounded-full border-2 ${s.ring}`)], []), `${s.label} percentile`],
+      )
+    }),
+  )
+
+  return h.div(
+    [h.Class('grid gap-4')],
+    [
+      windowButtons,
+      h.div(
+        [h.Class('grid grid-cols-2 gap-3 md:grid-cols-4')],
+        [
+          percentileCard(h, 'Composite', b.composite, Option.none(), 'Not enough history'),
+          multipleCard('pe'),
+          multipleCard('pb'),
+          multipleCard('ps'),
+        ],
+      ),
+      legend,
+      percentileChart(b, model.hiddenValuationSeries, h),
+      h.p([h.Class('m-0 text-xs text-muted')], [`Prices through ${b.asOf}. ${valuation.notes.join(' ')}`]),
+    ],
+  )
+}
+
+const valuationView = (model: Model, h: HtmlBuilder<Message>): Html => {
+  const showsCard = Company.match<boolean>(model.company, {
+    NotSelected: () => false,
+    Loading: () => false,
+    Failed: () => false,
+    Loaded: ({ maybeCard }) => Option.exists(maybeCard, card => card.excluded === undefined),
+  })
+  if (!showsCard) return h.empty
+
+  const body = AsyncData.matchDataSplitEmpty(model.valuation, {
+    onIdle: () => h.p([h.Class('text-muted')], ['Loading valuation history…']),
+    onLoading: () => h.p([h.Class('text-muted')], ['Loading valuation history…']),
+    onFailure: (error: string) => h.p([h.Class('text-muted')], [error]),
+    onData: (valuation: Valuation) => valuationBody(valuation, model, h),
+  })
+
+  return h.section(
+    [h.Class(`${PANEL} mt-6 px-6 py-5`), h.AriaLabel('Valuation')],
+    [
+      h.h2([h.Class('mb-1 text-lg font-semibold tracking-tight')], ['Valuation vs. own history']),
+      h.p(
+        [h.Class('mt-0 mb-4 text-muted')],
+        [
+          "Where today's multiples sit within this stock's own history over the chosen window: 0% = the cheapest it has been, 100% = the most expensive. The composite averages whichever of P/E, P/B and P/S have enough history. Informational only; it doesn't affect the score.",
+        ],
+      ),
+      body,
+    ],
+  )
+}
+
 const METHODOLOGY: ReadonlyArray<string> = [
   'GAAP figures from 10-K, 10-Q and DEF 14A filings via SEC EDGAR XBRL. TTM = latest FY + current YTD − prior-year YTD (equal to the last four quarters).',
   'Missing history scores 0. Tax rate 21%, hurdle 12%. Banks, broker-dealers, insurers and REITs are excluded by SIC code. Exchanges: B4 is not applicable, and the total is rescaled to 100 over the remaining metrics.',
@@ -739,6 +1018,7 @@ export const view = (model: Model, h: HtmlBuilder<Message>): Document => ({
             [h.Class('min-w-0')],
             [
               h.div([h.Class(PANEL)], [companyView(model, h)]),
+              valuationView(model, h),
               h.details(
                 [h.Class(`${PANEL} mt-6 px-6 pb-4`)],
                 [
