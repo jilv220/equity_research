@@ -4,8 +4,9 @@ import {
   fiscalYearEnds,
   series,
   ttm,
+  Series,
   type CompanyFacts,
-  type Series,
+  type Fact,
 } from "./facts.ts";
 
 export const TAX_RATE = 0.21;
@@ -34,6 +35,15 @@ export const LINE_ITEMS = {
     "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
   ],
   operatingIncome: ["OperatingIncomeLoss"],
+  // Fallbacks for filers with no operating-income subtotal (see operatingIncomeSeries).
+  pretaxIncome: [
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+  ],
+  nonoperatingIncome: ["NonoperatingIncomeExpense"],
+  interestExpense: ["InterestExpenseNonoperating", "InterestExpense", "InterestExpenseDebt"],
+  interestIncome: ["InvestmentIncomeInterest", "InvestmentIncomeInterestAndDividend"],
+  otherNonoperating: ["OtherNonoperatingIncomeExpense"],
   netIncome: ["NetIncomeLoss"],
   rnd: [
     "ResearchAndDevelopmentExpense",
@@ -246,6 +256,40 @@ const notApplicable = (id: string, name: string, formula: string, unit: Unit, no
   band: "not applicable",
 });
 
+/**
+ * Operating income, falling back per period when OperatingIncomeLoss isn't tagged
+ * (e.g. LLY never tags it; JNJ stopped in 2015):
+ *   1. OperatingIncomeLoss
+ *   2. Pre-tax income − non-operating income (expense)
+ *   3. Pre-tax income + interest expense − interest income − other non-operating income (expense):
+ *      the same split as 2, for filers that tag the pieces but not the total (JNJ).
+ * Derived facts carry a "derived: …" concept so the scorecard can say how the number was built.
+ */
+function operatingIncomeSeries(S: (key: keyof typeof LINE_ITEMS) => Series): Series {
+  const reported = S("operatingIncome");
+  const pretax = S("pretaxIncome");
+  const nonop = S("nonoperatingIncome");
+  const intExp = S("interestExpense");
+  const intInc = S("interestIncome");
+  const other = S("otherNonoperating");
+  const derived: Fact[] = [];
+  for (const p of pretax.facts) {
+    if (p.start === undefined || reported.duration(p.start, p.end)) continue;
+    const n = nonop.duration(p.start, p.end);
+    if (n) {
+      derived.push({ ...p, val: p.val - n.val, concept: "derived: pre-tax income − non-operating income" });
+      continue;
+    }
+    const ie = intExp.duration(p.start, p.end);
+    if (ie) {
+      const ii = intInc.duration(p.start, p.end)?.val ?? 0;
+      const o = other.duration(p.start, p.end)?.val ?? 0;
+      derived.push({ ...p, val: p.val + ie.val - ii - o, concept: "derived: pre-tax income + net interest expense − other non-operating income" });
+    }
+  }
+  return derived.length === 0 ? reported : new Series(reported.label, [...reported.facts, ...derived]);
+}
+
 const EXCLUDED_SIC: [number, number, string][] = [
   [6011, 6036, "bank"],
   [6211, 6211, "broker-dealer"],
@@ -270,7 +314,7 @@ export function scoreCompany(args: {
   const S = (key: keyof typeof LINE_ITEMS) => series(cf, key, [...LINE_ITEMS[key]]);
 
   const revenue = S("revenue");
-  const opInc = S("operatingIncome");
+  const opInc = operatingIncomeSeries(S);
   const fyEnds = fiscalYearEnds(revenue.empty ? opInc : revenue);
   const latestFy = fyEnds.at(-1) ?? "";
   const lastEnd = revenue.latestDurationEnd() ?? latestFy;
@@ -378,6 +422,11 @@ export function scoreCompany(args: {
   const T = (key: keyof typeof LINE_ITEMS) => ttm(S(key), asOf, fyEnds)?.value;
   const revTtm = ttm(revenue, asOf, fyEnds)?.value;
   const oiTtm = ttm(opInc, asOf, fyEnds)?.value;
+  // How the TTM operating income was built, when any period in it was derived.
+  const oiDerivedHow = [...new Set(
+    opInc.facts.filter((f) => f.concept.startsWith("derived") && (f.end === asOf || f.end === latestFy)).map((f) => f.concept.slice("derived: ".length)),
+  )];
+  const oiNote = oiDerivedHow.length > 0 ? `No operating-income line tagged: operating income = ${oiDerivedHow.join("; ")}.` : undefined;
   const ttmLabel = `TTM to ${asOf}`;
 
   const lastN = (n: number) => (fyEnds.length >= n ? fyEnds.slice(-n) : null);
@@ -399,7 +448,7 @@ export function scoreCompany(args: {
         [`Invested capital ${addYears(asOf, -1)}`]: usd(a1r.a),
         [`Invested capital ${asOf}`]: usd(a1r.b),
       },
-      note: a1r.nonPositive ? "Average invested capital ≤ 0: ROIC not meaningful, scored 0." : undefined,
+      note: [a1r.nonPositive ? "Average invested capital ≤ 0: ROIC not meaningful, scored 0." : "", oiNote ?? ""].filter(Boolean).join(" ") || undefined,
     },
     BANDS.A1,
   );
