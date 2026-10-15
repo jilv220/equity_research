@@ -240,8 +240,15 @@ const unscored = (id: string, name: string, formula: string, max: number, unit: 
   note,
 });
 
+/** A metric that doesn't apply to this kind of company: max 0, so it drops out of the total. */
+const notApplicable = (id: string, name: string, formula: string, unit: Unit, note: string): Metric => ({
+  ...unscored(id, name, formula, 0, unit, note),
+  band: "not applicable",
+});
+
 const EXCLUDED_SIC: [number, number, string][] = [
   [6011, 6036, "bank"],
+  [6211, 6211, "broker-dealer"],
   [6311, 6399, "insurer"],
   [6798, 6798, "REIT"],
 ];
@@ -282,6 +289,7 @@ export function scoreCompany(args: {
   };
 
   const sicNum = Number(args.sic);
+  const exchange = sicNum === 6200;
   const excl = EXCLUDED_SIC.find(([lo, hi]) => sicNum >= lo && sicNum <= hi);
   if (excl) {
     return {
@@ -525,8 +533,11 @@ export function scoreCompany(args: {
     inputs: { "R&D": usd(rndTtm), Revenue: usd(revTtm) }, note: rndS.empty ? "No R&D line item ever reported: R&D = 0." : undefined }, BANDS.B3);
 
   const sga = sgaTtm();
-  const B4 = metric({ id: "B4", name: "Brand / pull demand", formula: "SG&A ÷ revenue (TTM)", value: ratio(sga, revTtm), unit: "pct", max: 5,
-    inputs: { "SG&A": usd(sga), Revenue: usd(revTtm) } }, BANDS.B4);
+  const B4 = exchange
+    ? notApplicable("B4", "Brand / pull demand", "SG&A ÷ revenue (TTM)", "pct",
+      "Not applicable to exchanges (SIC 6200): they report costs by nature, so nearly all opex is overhead and the ratio says nothing about brand.")
+    : metric({ id: "B4", name: "Brand / pull demand", formula: "SG&A ÷ revenue (TTM)", value: ratio(sga, revTtm), unit: "pct", max: 5,
+      inputs: { "SG&A": usd(sga), Revenue: usd(revTtm) } }, BANDS.B4);
 
   // ---- C. Durability --------------------------------------------------------
   let C1: Metric;
@@ -631,18 +642,21 @@ export function scoreCompany(args: {
     }
   }
 
-  const sec = (id: string, name: string, max: number, metrics: Metric[]): Section => ({
-    id, name, max, metrics, points: metrics.reduce((a, m) => a + m.points, 0),
+  // Section max is the sum of its metrics' maxes, so not-applicable metrics (max 0) shrink it.
+  const sec = (id: string, name: string, metrics: Metric[]): Section => ({
+    id, name, max: metrics.reduce((a, m) => a + m.max, 0), metrics, points: metrics.reduce((a, m) => a + m.points, 0),
   });
   const sections = [
-    sec("A", "Monopoly profits", 30, [A1, A2, A3, A4]),
-    sec("B", "Moat signals", 25, [B1, B2, B3, B4, B5]),
-    sec("C", "Durability", 15, [C1, C2, C3]),
-    sec("D", "Cash generation", 10, [D1, D2]),
-    sec("E", "Foundations and alignment", 10, [E1, E2, E3]),
-    sec("F", "Definite optimism", 10, [F1, F2]),
+    sec("A", "Monopoly profits", [A1, A2, A3, A4]),
+    sec("B", "Moat signals", [B1, B2, B3, B4, B5]),
+    sec("C", "Durability", [C1, C2, C3]),
+    sec("D", "Cash generation", [D1, D2]),
+    sec("E", "Foundations and alignment", [E1, E2, E3]),
+    sec("F", "Definite optimism", [F1, F2]),
   ];
-  const rawTotal = sections.reduce((a, s) => a + s.points, 0);
+  // Rescale to 100 when some metrics don't apply.
+  const maxTotal = sections.reduce((a, s) => a + s.max, 0);
+  const rawTotal = (sections.reduce((a, s) => a + s.points, 0) * 100) / maxTotal;
   const gated = a1r.value === null || a1r.value < GATE_ROIC;
   const total = Math.round((gated ? Math.min(rawTotal, GATE_CAP) : rawTotal) * 10) / 10;
 
