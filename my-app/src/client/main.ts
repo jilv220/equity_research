@@ -355,7 +355,7 @@ const ratingTone = (rating: string) =>
   )
 
 const pointsTone = (metric: Metric) =>
-  Match.value(metric.points).pipe(
+  metric.max === 0 ? 'bg-canvas text-muted' : Match.value(metric.points).pipe(
     Match.when(Number.isGreaterThanOrEqualTo(metric.max), () => 'bg-good-soft text-good'),
     Match.when(Number.isGreaterThan(0), () => 'bg-mid-soft text-mid'),
     Match.orElse(() => 'bg-bad-soft text-bad'),
@@ -682,7 +682,7 @@ const companyView = (model: Model, h: HtmlBuilder<Message>): Html =>
 
 const METHODOLOGY: ReadonlyArray<string> = [
   'GAAP figures from 10-K, 10-Q and DEF 14A filings via SEC EDGAR XBRL. TTM = latest FY + current YTD − prior-year YTD (equal to the last four quarters).',
-  'Missing history scores 0. Tax rate 21%, hurdle 12%. Banks, insurers and REITs are excluded by SIC code.',
+  'Missing history scores 0. Tax rate 21%, hurdle 12%. Banks, broker-dealers, insurers and REITs are excluded by SIC code. Exchanges: B4 is not applicable, and the total is rescaled to 100 over the remaining metrics.',
   'Thresholds: "≥" bands include the lower bound; "≤ / >" bands (A4, B4, E3, F2, C2, C3) include the upper bound, as the table writes them.',
   'Invested capital = total debt (long-term incl. current portion, short-term borrowings, commercial paper; leases excluded) + total equity incl. NCI − cash & short-term investments. Average invested capital ≤ 0 → ROIC not meaningful → 0 points and the gate applies.',
   'A4 uses the population standard deviation. B1 scores 0 when revenue CAGR ≤ 0. EBITDA = operating income + D&A from the cash-flow statement. C3: net cash scores 5 even with negative EBITDA.',
