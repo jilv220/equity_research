@@ -396,32 +396,36 @@ export function scoreCompany(args: {
     BANDS.A1,
   );
 
+  // Years that are missing (short history or untagged data) simply don't count toward the total.
   let A2: Metric;
-  const fy11 = lastN(11);
-  if (!fy11) {
+  const fy11 = fyEnds.slice(-11);
+  const years = fy11.slice(1).map((end, i) => ({ end, r: roic(opInc.annual(end)?.val, fy11[i]!, end) }));
+  const scorable = years.filter((y) => y.r.value !== null || y.r.nonPositive);
+  if (scorable.length === 0) {
     A2 = unscored("A2", "Excess-return duration", "Count of last 10 FYs with ROIC ≥ 12%", 8, "count",
-      `Needs 11 consecutive fiscal year-ends of data (10 FYs + opening balance); ${fyEnds.length} available.`);
+      years.length === 0
+        ? `Needs at least 2 consecutive fiscal year-ends (1 FY + opening balance); ${fyEnds.length} available.`
+        : "ROIC not computable for any of the last 10 FYs (missing tagged data).");
   } else {
-    const years = fy11.slice(1).map((end, i) => ({ end, r: roic(opInc.annual(end)?.val, fy11[i]!, end) }));
+    const count = years.filter((y) => y.r.value !== null && y.r.value >= HURDLE).length;
     const missing = years.filter((y) => y.r.value === null && !y.r.nonPositive);
-    if (missing.length > 0) {
-      A2 = unscored("A2", "Excess-return duration", "Count of last 10 FYs with ROIC ≥ 12%", 8, "count",
-        `ROIC not computable for FY ${missing.map((y) => y.end.slice(0, 4)).join(", ")} (missing tagged data).`);
-    } else {
-      const count = years.filter((y) => y.r.value !== null && y.r.value >= HURDLE).length;
-      A2 = {
-        id: "A2",
-        name: "Excess-return duration",
-        formula: "Count of last 10 FYs with ROIC ≥ 12%; 0.8 pts each",
-        value: count,
-        unit: "count",
-        display: `${count} of 10 years`,
-        band: `${count} × 0.8`,
-        points: Math.min(8, count * 0.8),
-        max: 8,
-        inputs: Object.fromEntries(years.map((y) => [`FY ${y.end}`, y.r.nonPositive ? "IC ≤ 0" : pct(y.r.value)])),
-      };
-    }
+    const notes = [
+      years.length < 10 ? `Only ${years.length} FYs of history; the other ${10 - years.length} count as 0.` : "",
+      missing.length > 0 ? `ROIC not computable for FY ending ${missing.map((y) => y.end).join(", ")} (missing tagged data); counted as 0.` : "",
+    ].filter(Boolean);
+    A2 = {
+      id: "A2",
+      name: "Excess-return duration",
+      formula: "Count of last 10 FYs with ROIC ≥ 12%; 0.8 pts each",
+      value: count,
+      unit: "count",
+      display: `${count} of 10 years`,
+      band: `${count} × 0.8`,
+      points: Math.min(8, count * 0.8),
+      max: 8,
+      inputs: Object.fromEntries(years.map((y) => [`FY ${y.end}`, y.r.nonPositive ? "IC ≤ 0" : y.r.value === null ? "n/a" : pct(y.r.value)])),
+      note: notes.length > 0 ? notes.join(" ") : undefined,
+    };
   }
 
   const gpTtm = grossProfitTtm();
