@@ -6,6 +6,7 @@
 #                          Workers R2 Storage Edit, Secrets Store Edit (Alchemy's state store;
 #                          Read is not enough), Account Settings Read, Workers Tail Read
 #   CLOUDFLARE_ACCOUNT_ID  the account to deploy into
+# Settings → Environments → production: tick "Required reviewers" so every deploy waits for approval.
 name: Deploy
 
 on:
@@ -64,8 +65,11 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # CI can't answer Alchemy's approval prompt, so --yes applies the plan (it's still logged).
+      # The human gate is the `production` environment's required reviewer: this job waits for
+      # approval in the Actions tab before it starts.
       - name: Deploy
-        run: pnpm exec alchemy deploy --stage prod
+        run: pnpm exec alchemy deploy --stage prod --yes
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
