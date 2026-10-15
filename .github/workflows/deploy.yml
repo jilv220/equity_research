@@ -2,9 +2,9 @@
 # Follows https://alchemy.run/environments/ci/ without per-PR preview stages.
 #
 # Repo secrets (Settings → Secrets and variables → Actions):
-#   CLOUDFLARE_API_TOKEN   API token for the account (needs Secrets Store Write, plus Workers,
-#                          Workers R2 Storage and Workflows edit; Alchemy's state store needs the
-#                          Secrets Store permission)
+#   CLOUDFLARE_API_TOKEN   custom API token scoped to the account: Workers Scripts Edit,
+#                          Workers R2 Storage Edit, Secrets Store Edit (Alchemy's state store;
+#                          Read is not enough), Account Settings Read, Workers Tail Read
 #   CLOUDFLARE_ACCOUNT_ID  the account to deploy into
 name: Deploy
 
