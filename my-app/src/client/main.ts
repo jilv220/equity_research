@@ -346,16 +346,6 @@ const PANEL = 'rounded-xl border border-line bg-panel'
 const LABEL = 'text-xs font-semibold uppercase tracking-wider text-muted'
 const CELL = 'border-t border-line px-2.5 py-2 align-top'
 
-const WATCHLIST_SKELETON_ROWS = 8
-
-/** A placeholder block standing in for text or a figure while data loads; `size` sets its width and height. */
-const bone = (h: HtmlBuilder<Message>, size: string): Html =>
-  h.div([h.Class(`rounded bg-track motion-safe:animate-pulse ${size}`), h.AriaHidden(true)], [])
-
-/** Wraps skeleton markup so assistive tech announces one loading label instead of empty shapes. */
-const skeleton = (h: HtmlBuilder<Message>, label: string, children: ReadonlyArray<Html>): Html =>
-  h.div([h.Role('status'), h.AriaBusy(true), h.AriaLabel(label)], children)
-
 const ratingTone = (rating: string) =>
   Match.value(rating).pipe(
     Match.when('Monopoly', () => 'bg-good-soft text-good'),
@@ -381,23 +371,10 @@ const selectedTicker = (model: Model): Option.Option<string> =>
 const watchlistView = (model: Model, h: HtmlBuilder<Message>): Html => {
   const maybeSelected = selectedTicker(model)
   const emptyRow = (text: string) => h.tr([], [h.td([h.Class('px-4 py-3 text-muted')], [text])])
-  const skeletonRows = Array.makeBy(WATCHLIST_SKELETON_ROWS, index =>
-    h.tr(
-      [h.Key(`skeleton-${index}`), h.AriaHidden(true)],
-      [
-        h.td([h.Class('w-7 border-t border-line py-2 pl-4')], [bone(h, 'h-3.5 w-3')]),
-        h.td(
-          [h.Class('border-t border-line px-4 py-2')],
-          [bone(h, 'h-3.5 w-12'), h.div([h.Class('mt-1.5')], [bone(h, `h-3 ${index % 2 === 0 ? 'w-32' : 'w-24'}`)])],
-        ),
-        h.td([h.Class('border-t border-line py-2 pr-4')], [h.div([h.Class('flex justify-end')], [bone(h, 'h-3.5 w-8')])]),
-      ],
-    ),
-  )
 
   const rows = AsyncData.matchDataSplitEmpty(model.watchlist, {
-    onIdle: () => skeletonRows,
-    onLoading: () => skeletonRows,
+    onIdle: () => [emptyRow('Loading…')],
+    onLoading: () => [emptyRow('Loading…')],
     onFailure: error => [emptyRow(error)],
     onData: (summaries: ReadonlyArray<Summary>) =>
       Array.match(summaries, {
@@ -435,8 +412,6 @@ const watchlistView = (model: Model, h: HtmlBuilder<Message>): Html => {
       }),
   })
 
-  const table = h.table([h.Class('w-full border-collapse')], [h.tbody([], rows)])
-
   return h.aside(
     [h.Class('order-2 md:order-none')],
     [
@@ -444,9 +419,7 @@ const watchlistView = (model: Model, h: HtmlBuilder<Message>): Html => {
         [h.Class(`${PANEL} py-1.5`)],
         [
           h.h2([h.Class(`${LABEL} mx-4 my-2.5`)], ['Ranked watchlist']),
-          AsyncData.isIdle(model.watchlist) || AsyncData.isLoading(model.watchlist)
-            ? skeleton(h, 'Loading watchlist', [table])
-            : table,
+          h.table([h.Class('w-full border-collapse')], [h.tbody([], rows)]),
         ],
       ),
     ],
@@ -679,57 +652,6 @@ const scorecardView = (
   }
 }
 
-/** Placeholder shaped like a scorecard: head, the six section bars, then two sections of metric rows. */
-const scorecardSkeletonView = (ticker: string, h: HtmlBuilder<Message>): Html =>
-  skeleton(h, `Loading ${ticker} scorecard`, [
-    h.div(
-      [h.Class('flex flex-wrap items-start justify-between gap-6 border-b border-line px-6 py-5')],
-      [
-        h.div(
-          [h.Class('space-y-2')],
-          [
-            h.h2([h.Class('mb-1 text-[22px] font-semibold tracking-tight')], [ticker]),
-            bone(h, 'h-3.5 w-56'),
-            bone(h, 'h-3.5 w-72 max-w-full'),
-            h.div([h.Class('pt-1')], [bone(h, 'h-9 w-40 rounded-lg')]),
-          ],
-        ),
-        h.div(
-          [h.Class('space-y-2.5 sm:flex sm:flex-col sm:items-end')],
-          [bone(h, 'h-11 w-36'), bone(h, 'h-5 w-24 rounded-full')],
-        ),
-      ],
-    ),
-    h.div(
-      [h.Class('grid grid-cols-3 gap-2 border-b border-line px-6 py-4 md:grid-cols-6')],
-      Array.makeBy(6, () =>
-        h.div(
-          [h.Class('space-y-1.5')],
-          [bone(h, 'h-3 w-16'), bone(h, 'h-3.5 w-12'), bone(h, 'mt-1 h-1.5 w-full rounded-full')],
-        ),
-      ),
-    ),
-    ...Array.makeBy(2, section =>
-      h.div(
-        [h.Class('border-b border-line pt-2 pb-1 last:border-b-0')],
-        [
-          h.div([h.Class('mx-6 mt-2.5 mb-1.5 flex justify-between')], [bone(h, 'h-3 w-40'), bone(h, 'h-3 w-12')]),
-          ...Array.makeBy(section === 0 ? 4 : 3, row =>
-            h.div(
-              [h.Class('flex items-center gap-4 border-t border-line py-2.5 pr-6 pl-6')],
-              [
-                bone(h, 'h-3.5 w-6 shrink-0'),
-                h.div([h.Class('min-w-0 flex-1')], [bone(h, `h-3.5 ${row % 2 === 0 ? 'w-48' : 'w-36'} max-w-full`)]),
-                bone(h, 'hidden h-3.5 w-20 shrink-0 sm:block'),
-                bone(h, 'h-5 w-14 shrink-0 rounded-md'),
-              ],
-            ),
-          ),
-        ],
-      ),
-    ),
-  ])
-
 const status = (h: HtmlBuilder<Message>, text: string, isError = false): Html =>
   h.div([h.Class(`px-6 py-10 ${isError ? 'text-bad' : 'text-muted'}`), h.AriaLive('polite')], [text])
 
@@ -745,7 +667,7 @@ const companyView = (model: Model, h: HtmlBuilder<Message>): Html =>
           ),
         Company: () => h.empty,
       }),
-    Loading: ({ ticker }) => scorecardSkeletonView(ticker, h),
+    Loading: ({ ticker }) => status(h, `Loading ${ticker}…`),
     Failed: ({ error }) => status(h, error, true),
     Loaded: ({ ticker, maybeCard, maybeJob, pollCount }) =>
       Option.match(maybeCard, {
