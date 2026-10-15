@@ -37,7 +37,7 @@ const periodicForm = (form: string) => form.startsWith("10-K") || form.startsWit
 /**
  * A line item resolved from one or more XBRL concepts, in priority order.
  * Per reporting period the highest-priority concept wins; within a concept
- * the most recently filed value wins (so restatements replace originals).
+ * a 10-K beats a 10-Q, then the most recently filed value wins (so restatements replace originals).
  */
 export class Series {
   readonly label: string;
@@ -100,7 +100,10 @@ export function series(cf: CompanyFacts, label: string, concepts: string[], unit
       if (!periodicForm(r.form)) continue;
       const key = `${r.start ?? ""}|${r.end}`;
       const prev = latest.get(key);
-      if (!prev || r.filed > prev.filed) latest.set(key, { ...r, concept });
+      // A 10-K's figure beats a later 10-Q repeating it: annual() only accepts 10-K facts, so letting
+      // the 10-Q win would drop that fiscal year (FIX re-reported FY2025 in a 2026 10-Q).
+      const rank = (f: { form: string; filed: string }) => `${f.form.startsWith("10-K") ? 1 : 0}${f.filed}`;
+      if (!prev || rank(r) > rank(prev)) latest.set(key, { ...r, concept });
     }
     for (const [key, f] of latest) if (!byPeriod.has(key)) byPeriod.set(key, f);
   }

@@ -684,7 +684,7 @@ const METHODOLOGY: ReadonlyArray<string> = [
   'GAAP figures from 10-K, 10-Q and DEF 14A filings via SEC EDGAR XBRL. TTM = latest FY + current YTD − prior-year YTD (equal to the last four quarters).',
   'Missing history scores 0. Tax rate 21%, hurdle 12%. Banks, broker-dealers, insurers and REITs are excluded by SIC code. Exchanges: B4 is not applicable, and the total is rescaled to 100 over the remaining metrics.',
   'Thresholds: "≥" bands include the lower bound; "≤ / >" bands (A4, B4, E3, F2, C2, C3) include the upper bound, as the table writes them.',
-  'Invested capital = total debt (long-term incl. current portion, short-term borrowings, commercial paper; leases excluded) + total equity incl. NCI − cash & short-term investments. Average invested capital ≤ 0 → ROIC not meaningful → 0 points and the gate applies.',
+  'Invested capital = total debt (long-term incl. current portion, short-term borrowings, commercial paper; leases excluded) + total equity incl. NCI − cash & short-term investments; filers that tag debt only in the 10-K carry that balance forward up to a year. Average invested capital ≤ 0 → ROIC not meaningful → 0 points and the gate applies.',
   'Operating income: OperatingIncomeLoss when tagged; otherwise pre-tax income − non-operating income, or pre-tax income + interest expense − interest income − other non-operating income (A1 notes when derived).',
   'A4 uses the population standard deviation. B1 scores 0 when revenue CAGR ≤ 0. EBITDA = operating income + D&A from the cash-flow statement. C3: net cash scores 5 even with negative EBITDA.',
   'E1, E2, C2 are machine-read from filing text and inline XBRL; each shows the passage it was read from. Untagged customer concentration found only in text scores 0 pending review.',

@@ -1,6 +1,7 @@
 // The strict monopoly scorecard: fixed formulas on GAAP line items, hard thresholds.
 import {
   addYears,
+  days,
   fiscalYearEnds,
   series,
   ttm,
@@ -57,7 +58,11 @@ export const LINE_ITEMS = {
     "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
   ],
   sbc: ["ShareBasedCompensation", "AllocatedShareBasedCompensationExpense"],
-  capex: ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"],
+  capex: [
+    "PaymentsToAcquirePropertyPlantAndEquipment",
+    "PaymentsToAcquireProductiveAssets",
+    "PaymentsToAcquireOtherPropertyPlantAndEquipment",
+  ],
   buybacks: ["PaymentsForRepurchaseOfCommonStock"],
   dividends: ["PaymentsOfDividends", "PaymentsOfDividendsCommonStock"],
   dna: [
@@ -65,6 +70,9 @@ export const LINE_ITEMS = {
     "DepreciationAndAmortization",
     "DepreciationAmortizationAndAccretionNet",
   ],
+  // Filers that report the two separately (ORCL): D&A = depreciation + intangible amortization.
+  depreciation: ["Depreciation"],
+  intangibleAmortization: ["AmortizationOfIntangibleAssets"],
   equity: [
     "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
     "StockholdersEquity",
@@ -73,8 +81,13 @@ export const LINE_ITEMS = {
     "LongTermDebt",
     "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
   ],
-  debtNoncurrent: ["LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations"],
-  debtCurrent: ["LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent"],
+  debtNoncurrent: [
+    "LongTermDebtNoncurrent",
+    "LongTermDebtAndCapitalLeaseObligations",
+    "LongTermNotesPayable",
+    "LongTermNotesAndLoans",
+  ],
+  debtCurrent: ["LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent", "NotesPayableCurrent"],
   shortTermBorrowings: ["ShortTermBorrowings"],
   commercialPaper: ["CommercialPaper"],
   cashAndSti: ["CashCashEquivalentsAndShortTermInvestments"],
@@ -388,12 +401,36 @@ export function scoreCompany(args: {
   const stiS = S("sti");
 
   const tol = 8;
-  const debtAt = (d: string) => {
+  const debtSeries = [debtTotalS, debtNcS, debtCurS, stbS, cpS];
+  const debtOn = (d: string) => {
     const total = debtTotalS.instant(d, tol)?.val;
     const nc = debtNcS.instant(d, tol)?.val;
     const cur = debtCurS.instant(d, tol)?.val;
     const lt = total ?? (nc !== undefined || cur !== undefined ? (nc ?? 0) + (cur ?? 0) : 0);
     return lt + (stbS.instant(d, tol)?.val ?? 0) + (cpS.instant(d, tol)?.val ?? 0);
+  };
+  /**
+   * Total debt at `d`. Some filers tag debt only in the 10-K (CAT's 10-Qs split it by segment, which
+   * companyfacts omits). For them, when nothing is tagged at `d`, the latest balance within the year
+   * before is carried forward and `carriedFrom` says from when. A filer that does tag debt in its
+   * recent 10-Qs and has nothing at `d` is taken to have no debt (e.g. MNST after repaying its loan).
+   */
+  const debtAt = (d: string): { value: number; carriedFrom?: string } => {
+    if (debtSeries.some((s) => s.instant(d, tol))) return { value: debtOn(d) };
+    const tagsQuarterly = debtSeries.some((s) =>
+      s.facts.some((f) => f.start === undefined && f.form.startsWith("10-Q") && f.end <= d && days(f.end, d) <= 730));
+    if (tagsQuarterly) return { value: 0 };
+    let last: string | undefined;
+    for (const s of debtSeries)
+      for (const f of s.facts)
+        if (f.start === undefined && f.end <= d && days(f.end, d) <= 370 && (!last || f.end > last)) last = f.end;
+    if (!last) return { value: 0 };
+    const value = debtOn(last);
+    return value === 0 ? { value } : { value, carriedFrom: last };
+  };
+  const debtCarryNote = (...dates: string[]) => {
+    const from = dates.map((d) => debtAt(d).carriedFrom).filter((x): x is string => x !== undefined).sort()[0];
+    return from ? `Debt not tagged at every date used; the balance from ${from} is carried forward.` : "";
   };
   const cashAt = (d: string) => {
     const combined = cashStiS.instant(d, tol)?.val;
@@ -406,7 +443,7 @@ export function scoreCompany(args: {
     const e = equityS.instant(d, tol)?.val;
     const c = cashAt(d);
     if (e === undefined || c === undefined) return undefined;
-    return debtAt(d) + e - c;
+    return debtAt(d).value + e - c;
   };
 
   /** ROIC = OI × (1 − t) ÷ average(opening, closing) invested capital. null when not computable or IC ≤ 0. */
@@ -448,7 +485,11 @@ export function scoreCompany(args: {
         [`Invested capital ${addYears(asOf, -1)}`]: usd(a1r.a),
         [`Invested capital ${asOf}`]: usd(a1r.b),
       },
-      note: [a1r.nonPositive ? "Average invested capital ≤ 0: ROIC not meaningful, scored 0." : "", oiNote ?? ""].filter(Boolean).join(" ") || undefined,
+      note: [
+        a1r.nonPositive ? "Average invested capital ≤ 0: ROIC not meaningful, scored 0." : "",
+        oiNote ?? "",
+        debtCarryNote(addYears(asOf, -1), asOf),
+      ].filter(Boolean).join(" ") || undefined,
     },
     BANDS.A1,
   );
@@ -616,9 +657,12 @@ export function scoreCompany(args: {
         inputs: {}, note: cc.detail, evidence: cc.evidence, source: cc.source }, BANDS.C2) };
 
   const dnaS = S("dna");
-  const dnaTtm = ttm(dnaS, asOf, fyEnds)?.value;
+  const depTtm = ttm(S("depreciation"), asOf, fyEnds)?.value;
+  const dnaTtm = ttm(dnaS, asOf, fyEnds)?.value
+    ?? (depTtm === undefined ? undefined : depTtm + (ttm(S("intangibleAmortization"), asOf, fyEnds)?.value ?? 0));
   const ebitda = oiTtm !== undefined && dnaTtm !== undefined ? oiTtm + dnaTtm : undefined;
-  const debtNow = debtAt(asOf);
+  const debtNowAt = debtAt(asOf);
+  const debtNow = debtNowAt.value;
   const cashNow = cashAt(asOf);
   const netDebt = cashNow === undefined ? undefined : debtNow - cashNow;
   const c3inputs = { "Total debt": usd(debtNow), "Cash & ST investments": usd(cashNow), "Net debt": usd(netDebt),
@@ -639,6 +683,8 @@ export function scoreCompany(args: {
     C3 = { id: "C3", name: "Balance sheet", formula: "(Total debt − cash & ST investments) ÷ TTM EBITDA", value: x, unit: "x",
       display: `${x.toFixed(2)}×`, band: x <= 1 ? "0–1×" : x <= 2.5 ? "1–2.5×" : ">2.5×", points: x <= 1 ? 3 : x <= 2.5 ? 1 : 0, max: 5, inputs: c3inputs };
   }
+  const c3Carry = debtCarryNote(asOf);
+  if (c3Carry) C3 = { ...C3, note: [C3.note, c3Carry].filter(Boolean).join(" ") };
 
   // ---- D. Cash generation ---------------------------------------------------
   const ocfTtm = T("ocf");
