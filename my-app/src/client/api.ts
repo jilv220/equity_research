@@ -90,3 +90,16 @@ const ACTIVE_JOB_STATUSES: ReadonlyArray<string> = [
 
 export const isJobActive = (job: Job): boolean =>
   ACTIVE_JOB_STATUSES.includes(job.status)
+
+/** Daily valuation multiples (see src/valuation/multiples.ts). Columnar: index i is one trading day. */
+export const Valuation = Schema.Struct({
+  ticker: Schema.String,
+  computedAt: Schema.String,
+  dates: Schema.Array(Schema.String),
+  close: Schema.Array(Schema.Number),
+  pe: Schema.Array(Schema.NullOr(Schema.Number)),
+  pb: Schema.Array(Schema.NullOr(Schema.Number)),
+  ps: Schema.Array(Schema.NullOr(Schema.Number)),
+  notes: Schema.Array(Schema.String),
+})
+export type Valuation = typeof Valuation.Type

@@ -85,6 +85,12 @@ export function edgar(userAgent: string, cache: Cache) {
       return { ticker: t, cik, tenK: tenK?.accn ?? null, proxy: proxy?.accn ?? null };
     },
 
+    /** XBRL company facts. After `prefetch` this reads only from the cache. */
+    async companyFacts(ticker: string): Promise<CompanyFacts> {
+      const { cik } = await cikFor(ticker);
+      return JSON.parse(await get(factsUrl(cik), `sec/companyfacts/${cik}.json`, 12 * HOUR)) as CompanyFacts;
+    },
+
     /** Parse and score. After `prefetch` this reads only from the cache. */
     async score(ticker: string): Promise<Scorecard> {
       const { cik, t, subs, tenK, proxy } = await filings(ticker, false);
